@@ -70,11 +70,12 @@ LEADERBOARD_PATH = os.path.join(APP_DIR, "leaderboard.json")
 
 DEFAULT_SETTINGS = {
     "draw_count": 3,           # 1 or 3
-    "auto_move": True,
-    "show_hints": True,
+    "auto_move": True,      # automatically add cards to their respective stacks
+    "show_hints": True,     # tells the user of any obvious moves (single step)
     "theme": "classic",       # classic | high_contrast | green | blue
     "ascii_only": False,       # force ASCII fallback for suits
-    "animations": False        # simple drop/flip animations (subtle)
+    "animations": False,        # simple drop/flip animations (subtle) and targeter (btw fix this you lazy bum)
+    "full_move": True           # moves the entire tableu stack.
 }
 
 if not os.path.isdir(APP_DIR):
@@ -386,7 +387,7 @@ class UI:
         maxy, maxx = self.stdscr.getmaxyx()
 
         # title and stats
-        title = "Solitaire"
+        title = "Solitaire - made with ♥ from literal-gargoyle"
         self.stdscr.addstr(0, 2, title, curses.color_pair(4) | curses.A_BOLD)
         elapsed = int(time.monotonic() - gs.start_time) if not gs.won else int(self._win_time)
         mins, secs = divmod(max(elapsed, 0), 60)
@@ -401,20 +402,27 @@ class UI:
         pad = 2
         # Stock, Waste, Foundations(4)
         # Stock box
-        self._draw_pile_box(y0, x0, label="STK", selected=self.cursor==("stock",0), count=len(gs.stock), face_up=False)
+        self._draw_pile_box(y0 - 1, x0, label="STK", selected=self.cursor==("stock",0), count=len(gs.stock), face_up=False)
         # Waste
-        self._draw_card(y0, x0 + (CARD_W+pad)*1, gs.waste[-1] if gs.waste else None, label="WST", selected=self.cursor==("waste",0))
+        self._draw_card(y0 - 1, x0 + (CARD_W+pad)*1, gs.waste[-1] if gs.waste else None, label="WST", selected=self.cursor==("waste",0))
         # Foundations
         for s in range(4):
             card = gs.foundations[s][-1] if gs.foundations[s] else None
             sel = self.cursor == ("foundation", s)
-            self._draw_card(y0, x0 + (CARD_W+pad)*(3+s), card, label=f"F{s+1}", selected=sel)
+            self._draw_card(y0 - 1, x0 + (CARD_W+pad)*(3+s), card, label=f"F{s+1}", selected=sel)
 
         # Tableaus (7 cols)
         y_tab = y0 + 3
         for col in range(7):
             x = x0 + (CARD_W+pad)*col
-            self._draw_column(gs.tableaus[col], y_tab, x, selected=(self.cursor==("tableau", col)))
+            targeted = False # Stupid bug on my part, forgot to set the variable before use
+            if hasattr(self, "game") and getattr(self.game, "_sel", None) is not None:
+                sel = self.game._sel
+                if sel[0] == "tableau" and sel[1] == col:
+                    targeted = True
+            self._draw_column(gs.tableaus[col], y_tab, x,
+                             selected=(self.cursor==("tableau", col)),
+                             targeted=targeted)
 
         if gs.won:
             msg = "YOU WON! Press N for new game or L for leaderboards."
@@ -459,7 +467,7 @@ class UI:
         except curses.error:
             pass
 
-    def _draw_column(self, pile: List[Card], y: int, x: int, selected: bool=False):
+    def _draw_column(self, pile: List[Card], y: int, x: int, selected: bool=False, targeted: bool=False):
         # draw vertical pile
         for i, c in enumerate(pile):
             yy = y + i * TAB_VSTEP
@@ -473,6 +481,11 @@ class UI:
         if selected:
             try:
                 self.stdscr.addstr(y-1, x, "▼", curses.color_pair(5))
+            except curses.error:
+                pass
+        if targeted:
+            try:
+                self.stdscr.addstr(y-2, x, "↧", curses.color_pair(3))
             except curses.error:
                 pass
 
@@ -489,6 +502,7 @@ def show_settings(stdscr, settings: Dict[str, Any]) -> bool:
         ("Theme", ["classic", "high_contrast", "green", "blue"]),
         ("ASCII suits", ["Off", "On"]),
         ("Animations", ["Off", "On"]),
+        ("Full Move", ["Off", "On"]),
     ]
     idxs = {
         0: (0, 1 if settings['draw_count']==3 else 0),
@@ -497,6 +511,7 @@ def show_settings(stdscr, settings: Dict[str, Any]) -> bool:
         3: (3, ["classic","high_contrast","green","blue"].index(settings['theme'])),
         4: (4, 1 if settings['ascii_only'] else 0),
         5: (5, 1 if settings['animations'] else 0),
+        6: (6, 1 if settings['full_move'] else 0),
     }
     sel = 0
     changed = False
@@ -524,6 +539,8 @@ def show_settings(stdscr, settings: Dict[str, Any]) -> bool:
                 current = "On" if settings['ascii_only'] else "Off"
             elif i == 5:
                 current = "On" if settings['animations'] else "Off"
+            elif i == 6:
+                current = "On" if settings['full_move'] else "Off"
 
             row = f"{name:<14}: {current}"
             attr = curses.A_REVERSE if i==sel else 0
@@ -555,6 +572,9 @@ def show_settings(stdscr, settings: Dict[str, Any]) -> bool:
                 settings['ascii_only'] = not settings['ascii_only']
             elif sel == 5:
                 settings['animations'] = not settings['animations']
+            elif sel == 6:
+                settings['full_move'] = not settings['full_move']
+                
         elif ch in (curses.KEY_RIGHT, ord('l'), 10, 13):
             # flip right or enter
             changed = True
@@ -571,6 +591,8 @@ def show_settings(stdscr, settings: Dict[str, Any]) -> bool:
                 settings['ascii_only'] = not settings['ascii_only']
             elif sel == 5:
                 settings['animations'] = not settings['animations']
+            elif sel == 6:
+                settings['full_move'] = not settings['full_move']
 
     return changed
 
@@ -624,6 +646,7 @@ class Game:
         self.state = deal_new_game(settings)
         self.undo_stack: List[GameState] = []
         self._win_time = 0
+        self.ui.game = self
 
     def push_undo(self):
         self.undo_stack.append(self.state.clone())
@@ -688,9 +711,24 @@ class Game:
                 if self.state.foundations[idx]:
                     self._sel = ("foundation", idx)
             elif zone == "tableau":
-                # select top face-up run; default depth 1, allow ↑/↓ later to adjust depth
-                if any(c.face_up for c in self.state.tableaus[idx][-len(self.state.tableaus[idx]):]):
-                    self._sel = ("tableau", idx, 1)  # (src, col, depth)
+                # Setting control for full_move logic here
+                if not self.settings.get('full_move', True):
+                    # Setting Off
+                    if any(c.face_up for c in self.state.tableaus[idx][-len(self.state.tableaus[idx]):]):
+                        self._sel = ("tableau", idx, 1)  # (src, col, depth)
+                elif self.settings.get('full_move', True):
+                    # Setting On
+                    pile = self.state.tableaus[idx]
+                    i = len(pile)-1
+                    while i >= 0 and pile[i].face_up:
+                        i -= 1
+                    max_depth = len(pile) - (i+1)
+                    if max_depth > 0:
+                        self._sel = ("tableau", idx, max_depth)
+                else:
+                    # uh bruh how tf did you get here
+                    print("fuh")
+                    quit()
         else:
             # place to destination
             src = self._sel
